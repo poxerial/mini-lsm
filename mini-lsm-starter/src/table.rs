@@ -4,12 +4,14 @@
 mod builder;
 mod iterator;
 
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
 pub use builder::SsTableBuilder;
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use iterator::SsTableIterator;
 
 use crate::block::Block;
@@ -20,7 +22,7 @@ pub struct BlockMeta {
     /// Offset of this data block.
     pub offset: usize,
     /// The first key of the data block, mainly used for index purpose.
-    pub first_key: Bytes,
+    pub first_key: Vec<u8>,
 }
 
 impl BlockMeta {
@@ -32,12 +34,27 @@ impl BlockMeta {
         #[allow(clippy::ptr_arg)] // remove this allow after you finish
         buf: &mut Vec<u8>,
     ) {
-        unimplemented!()
+        for meta in block_meta {
+            buf.put_u32_ne(meta.offset as u32);
+            buf.put_u16_ne(meta.first_key.len() as u16);
+            buf.append(&mut meta.first_key.clone());
+        }
     }
 
     /// Decode block meta from a buffer.
     pub fn decode_block_meta(buf: impl Buf) -> Vec<BlockMeta> {
-        unimplemented!()
+        let mut buf = buf;
+        let mut block_metas = Vec::new();
+        while buf.remaining() != 0 {
+            let offset = buf.get_u32_ne() as usize;
+            let key_len = buf.get_u16_ne();
+            let mut first_key = Vec::new();
+            for _ in 0..key_len {
+                first_key.push(buf.get_u8());
+            }
+            block_metas.push(BlockMeta { offset, first_key });
+        }
+        block_metas
     }
 }
 
@@ -55,11 +72,19 @@ impl FileObject {
 
     /// Create a new file object (day 2) and write the file to the disk (day 4).
     pub fn create(path: &Path, data: Vec<u8>) -> Result<Self> {
-        unimplemented!()
+        let mut file = File::create(path)?;
+        let len = file.write(&data[..])?;
+        if len != data.len() {
+            panic!("");
+        }
+        Ok(Self(Bytes::from(data)))
     }
 
     pub fn open(path: &Path) -> Result<Self> {
-        unimplemented!()
+        let mut file = File::open(path)?;
+        let mut content = Vec::new();
+        file.read_to_end(&mut content)?;
+        Ok(Self(Bytes::from(content)))
     }
 }
 
@@ -85,12 +110,27 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
-        unimplemented!()
+        let len = file.0.len();
+        let block_meta_offset = BytesMut::from(&file.0[len - 4..]).get_u32_ne() as usize;
+        let block_metas = BlockMeta::decode_block_meta(&file.0[block_meta_offset..len - 4]);
+        Ok(SsTable {
+            file,
+            block_metas,
+            block_meta_offset,
+        })
     }
 
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        let start = self.block_metas[block_idx].offset;
+        let end = if block_idx < self.block_metas.len() - 1 {
+            self.block_metas[block_idx + 1].offset
+        } else {
+            self.block_meta_offset
+        };
+        let data = &self.file.0[start..end];
+        let block = Block::decode(data);
+        Ok(Arc::from(block))
     }
 
     /// Read a block from disk, with block cache. (Day 4)
@@ -102,12 +142,23 @@ impl SsTable {
     /// Note: You may want to make use of the `first_key` stored in `BlockMeta`.
     /// You may also assume the key-value pairs stored in each consecutive block are sorted.
     pub fn find_block_idx(&self, key: &[u8]) -> usize {
-        unimplemented!()
+        let (mut l, mut r) = (0_usize, self.num_of_blocks());
+        while l < r {
+            let mid = (l + r) / 2;
+            let mid_key = &self.block_metas[mid].first_key;
+            let order = mid_key[..].cmp(key);
+            if order.is_ge() {
+                r = mid;
+            } else {
+                l = mid + 1;
+            }
+        }
+        l - 1
     }
 
     /// Get number of data blocks.
     pub fn num_of_blocks(&self) -> usize {
-        unimplemented!()
+        self.block_metas.len()
     }
 }
 
