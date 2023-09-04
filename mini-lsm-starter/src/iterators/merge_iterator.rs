@@ -1,10 +1,8 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::cmp::{self};
 use std::collections::BinaryHeap;
+use std::mem::swap;
 
-use anyhow::Result;
+use anyhow::{Ok, Result};
 
 use super::StorageIterator;
 
@@ -36,32 +34,85 @@ impl<I: StorageIterator> Ord for HeapWrapper<I> {
 }
 
 /// Merge multiple iterators of the same type. If the same key occurs multiple times in some
-/// iterators, perfer the one with smaller index.
+/// iterators, choose the one with smaller index.
 pub struct MergeIterator<I: StorageIterator> {
     iters: BinaryHeap<HeapWrapper<I>>,
-    current: HeapWrapper<I>,
+    current: Option<HeapWrapper<I>>,
 }
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let mut biters = BinaryHeap::<HeapWrapper<I>>::new();
+        let mut iters = iters;
+        let mut i = 0_usize;
+        for iter in iters.drain(..) {
+            if iter.is_valid() {
+                biters.push(HeapWrapper(i, iter));
+                i += 1;
+            }
+        }
+        let current = if i != 0 {
+            Some(biters.pop().unwrap())
+        } else {
+            None
+        };
+        Self {
+            iters: biters,
+            current,
+        }
+    }
+
+    fn step(&mut self) {
+        if self.current.is_none() {
+            return;
+        }
+
+        if self.current.as_mut().unwrap().1.next().is_err()
+            || !self.current.as_ref().unwrap().1.is_valid()
+        {
+            self.current = self.iters.pop();
+            return;
+        }
+
+        let mut iter = self.iters.pop();
+        if iter.is_none() {
+            return;
+        }
+
+        if iter.as_ref().unwrap().gt(self.current.as_ref().unwrap()) {
+            swap(&mut iter, &mut self.current);
+        }
+
+        self.iters.push(iter.unwrap());
     }
 }
 
 impl<I: StorageIterator> StorageIterator for MergeIterator<I> {
     fn key(&self) -> &[u8] {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .map_or_else(|| false, |iter| iter.1.is_valid())
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if !self.is_valid() {
+            return Ok(());
+        }
+        let curr_key = Vec::from(self.key());
+
+        self.step();
+
+        while self.is_valid() && curr_key[..].eq(self.key()) {
+            self.step();
+        }
+        Ok(())
     }
 }

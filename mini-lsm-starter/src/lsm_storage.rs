@@ -10,9 +10,10 @@ use bytes::Bytes;
 use parking_lot::RwLock;
 
 use crate::block::Block;
+use crate::iterators::StorageIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::mem_table::MemTable;
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -57,6 +58,43 @@ impl LsmStorage {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        let guard = self.inner.read();
+        let inner = guard.clone();
+        drop(guard);
+
+        let val = inner.memtable.get(key);
+        match val {
+            Some(value) => return Ok(Some(value)),
+            _ => {}
+        };
+
+        for memtable in inner.imm_memtables.iter().rev() {
+            let val = inner.memtable.get(key);
+            match val {
+                Some(value) => return Ok(Some(value)),
+                _ => {}
+            };
+        }
+
+        for l0_sst in inner.l0_sstables.iter().rev() {
+            let iter = SsTableIterator::create_and_seek_to_key(l0_sst, key)?;
+            if iter.is_valid() && iter.key() == key {
+                return Ok(Some(iter.value()))
+            }
+        }
+
+        for level in inner.levels {
+            let idx = level.partition_point(|table|{
+                let iter = SsTableIterator::create_and_seek_to_key(table, key)?;
+                iter.is_valid()  
+            }).saturating_sub(1);
+            let table = level[idx];
+            let iter = SsTableIterator::create_and_seek_to_key(table, key)?;
+            if iter.is_valid() && iter.key() == key {
+                return Ok(Some(iter.value()))
+            }
+        }
+
         unimplemented!()
     }
 
@@ -64,12 +102,16 @@ impl LsmStorage {
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         assert!(!value.is_empty(), "value cannot be empty");
         assert!(!key.is_empty(), "key cannot be empty");
-        unimplemented!()
+        let guard = self.inner.write();
+        guard.as_ref().memtable.put(key, value);
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        unimplemented!()
+        let guard = self.inner.write();
+        guard.as_ref().memtable.put(key, &[]);
+        Ok(())
     }
 
     /// Persist data to disk.
